@@ -5,10 +5,10 @@
 > for the stock firmware — built entirely through black‑box reverse engineering.
 
 ```
-   ┌───────────────────────────────────────────────────────────────┐
+   ┌─────────────────────────────────────────────────────────────────┐
    │  Stock:   plays → 20 min idle → deep standby → silence 😴       │
    │  Patched: plays → idle → self‑reboot every ~17 min → awake 🔊   │
-   └───────────────────────────────────────────────────────────────┘
+   └─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -184,14 +184,15 @@ direction, the (long, attended) flash‑and‑wait testing, and the hardware:
 
 | Line item | Hours | Rate | Cost |
 |-----------|------:|-----:|-----:|
-| Firmware RE + disassembly + checksum cracking + patch dev (AI, human‑equivalent) | ~160 | $120/h | **$19,200** |
-| Owner — ideas, architecture & direction (host‑driven insight, reboot strategy, NAP/audio‑state, `{3,6}` params) | ~25 | $55/h | **$1,375** |
-| Owner — testing: ~100 flash cycles + dozens of 17–20 min standby/reboot waits | ~55 | $55/h | **$3,025** |
-| Hardware — Raspberry Pi Zero 2 W, microSD, PSU, USB‑serial adapter, cables | — | — | **~$45** |
-| **Total** | **~240 h** | | **≈ $23,600** |
+| Firmware RE + disassembly + checksum cracking + patch dev (AI, human‑equivalent) | ~160 | $100/h | **$16,000** |
+| Owner — ideas, architecture & direction (host‑driven insight, reboot strategy, NAP/audio‑state, `{3,6}` params) | ~25 | $65/h | **$1,625** |
+| Owner — testing: ~100 flash cycles + dozens of 17–20 min standby/reboot waits | ~55 | $65/h | **$3,575** |
+| Hardware — Raspberry Pi Zero 2 W, microSD, PSU, USB‑serial adapter, cables | — | — | **~$50** |
+| AI — Claude Code Opus (~75M total tokens) | — | — | **~$1200** |
+| **Total** | **~80 h** | | **≈ $6,450** |
 
 *(Rough, tongue‑in‑cheek figures — the speaker itself isn't counted. The real point:
-"just disable the sleep timer" turned into a ~240‑hour archaeology dig because the timer
+"just disable the sleep timer" turned into a months-long archaeology dig because the timer
 was on a chip we could never read.)*
 
 ---
