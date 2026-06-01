@@ -5,10 +5,10 @@
 > for the stock firmware — built entirely through black‑box reverse engineering.
 
 ```
-   ┌─────────────────────────────────────────────────────────────────┐
+   ───────────────────────────────────────────────────────────────────
    │  Stock:   plays → 20 min idle → deep standby → silence 😴       │
    │  Patched: plays → idle → self‑reboot every ~17 min → awake 🔊   │
-   └─────────────────────────────────────────────────────────────────┘
+   ───────────────────────────────────────────────────────────────────
 ```
 
 ---
@@ -88,7 +88,7 @@ for the full file format.
 
 1. Put the speaker into **BL (Boot Loader) mode**.
 2. On the same LAN, open the bootloader's upload page in a browser
-   (`http://<speaker-ip>:8000/bl_index.asp`).
+   (`http://woodbourne.local/bl_index.asp`).
 3. Upload `AirplaySpeaker_B9519_H4_D18M12_BSL_Dec18_UART_patched.FW`.
 4. Wait for the flash to finish and the speaker to reboot.
 
@@ -114,7 +114,7 @@ and recomputes all CRCs — fully deterministic and self‑verifying.
 Once the patched firmware is running:
 
 ```
-$ telnet <speaker-ip> 10000
+$ telnet woodbourne.local 10000
 BridgeCo AG Telnet server
 
 sds://> os timestamp
