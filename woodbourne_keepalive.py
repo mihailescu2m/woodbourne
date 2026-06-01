@@ -13,7 +13,7 @@ Requirements:
   sudo apt install pulseaudio pulseaudio-module-raop
 
 Usage:
-  python3 woodbourne_keepalive.py [--host 192.168.1.92] [--interval 600]
+  python3 woodbourne_keepalive.py [--host woodbourne.local] [--interval 600]
 """
 
 import argparse
@@ -186,8 +186,8 @@ def send_silence(sink_name, wav_path, verbose=False):
 def main():
     parser = argparse.ArgumentParser(
         description="Woodbourne Keep-Alive: prevents speaker sleep")
-    parser.add_argument("--host", default="192.168.1.92",
-                        help="Speaker IP (default: 192.168.1.92)")
+    parser.add_argument("--host", default="woodbourne.local",
+                        help="Speaker IP (default: woodbourne.local)")
     parser.add_argument("--interval", type=float, default=600,
                         help="Seconds between checks (default: 600 = 10 min)")
     parser.add_argument("--speaker-name", default="Woodbourne",
