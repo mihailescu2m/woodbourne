@@ -61,7 +61,7 @@ Offset  Size  Value              Description
 
 **Aggregate CRC:** CRC-32 of bytes 0x20..0xCF, with the aggregate CRC field itself (bytes 0x4C..0x4F) zeroed before computation.
 
-**Patched field:** Offset 0x30 is changed from `"094540  "` to `"NOSLEEP "` as a version marker.
+> The released patch leaves all header/version fields (including 0x30 and the firmware ID at 0x3C) **unchanged**. Earlier builds experimented with version markers here, but altering header/version fields was found to risk the bootloader rejecting the image on a soft reboot, so the final image keeps them at stock values. See [power.md](power.md).
 
 ## Segment descriptors
 
@@ -142,7 +142,7 @@ At boot, the BSL:
 
 The Fletcher-32 uses little-endian 16-bit words with initial values s1=0xFFFF, s2=0xFFFF, and per-word modulo 65535.
 
-**Critical implication:** Since the BSL area is preserved during BL-mode flashing, the Fletcher-32 expected value at 0x104 always retains the **original** firmware's value. Any code patches must therefore produce the same Fletcher-32 as the original, which is achieved through a [compensation technique](patch-7-fletcher32-compensation.md).
+**Critical implication:** Since the BSL area is preserved during BL-mode flashing, the Fletcher-32 expected value at 0x104 always retains the **original** firmware's value. Any code patches must therefore produce the same Fletcher-32 as the original, which is achieved through a [compensation technique](patch-3-fletcher32-compensation.md).
 
 ## Checksum summary
 

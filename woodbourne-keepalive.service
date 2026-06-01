@@ -1,0 +1,17 @@
+[Unit]
+Description=Woodbourne AirPlay Keep-Alive
+After=network-online.target avahi-daemon.service pulseaudio.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=volumio
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/bin/sleep 15
+ExecStart=/usr/bin/python3 /home/volumio/woodbourne_keepalive.py --host 192.168.1.92 --interval 300 --verbose
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

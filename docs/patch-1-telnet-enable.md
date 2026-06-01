@@ -1,4 +1,4 @@
-# Patch 6: Telnet Enable
+# Patch 1: Telnet Enable
 
 **Purpose:** Activate the built-in BridgeCo telnet diagnostic shell, accessible on TCP port 10000.
 
@@ -40,7 +40,7 @@ The patch changes the UART1 handler to store TELNET mode (1) instead:
 | 0x107628 | `10 00 00 1A` | `01 00 A0 E3` | `BNE 0x107670` -> `MOV R0, #1` |
 | 0x10762C | `1D 50 C4 E5` | `1D 00 C4 E5` | `STRB R5, [R4,#0x1D]` -> `STRB R0, [R4,#0x1D]` |
 
-After this patch, whenever the firmware reads `Shell=UART1` from config (whether from RSDB defaults or NVRAM), it treats it as `TELNET` mode. The telnet server starts its TCP listener on port 10000 (the `TelnetPort_Obsolete` value from `[CommunicationSettings]`).
+After this patch, whenever the firmware reads `Shell=UART1` from config, it stores TELNET mode instead. The telnet server starts its TCP listener on port 10000 (the `TelnetPort_Obsolete` value from `[CommunicationSettings]`).
 
 ## Connection
 
@@ -71,4 +71,4 @@ fburn         Flash burn operations
 
 - The shell is redirected from serial UART1 to the telnet TCP socket. Serial console output is no longer available on UART1.
 - The telnet server listens on port 10000 with no authentication. This is suitable for a trusted home network.
-- This is a code patch in Seg1, so it affects the Fletcher-32 checksum and requires [compensation](patch-7-fletcher32-compensation.md).
+- This is a code patch in Seg1, so it affects the Fletcher-32 checksum and requires [compensation](patch-3-fletcher32-compensation.md).

@@ -1,4 +1,4 @@
-# Patch 7: Fletcher-32 Compensation
+# Patch 3: Fletcher-32 Compensation
 
 **Purpose:** Ensure the patched firmware passes the BSL's Fletcher-32 integrity check despite code modifications in Seg1.
 
@@ -47,16 +47,16 @@ d2 = (need_s1 - d1) mod 65535
 
 ### Compensation location
 
-The two halfwords are placed at file offsets **0x4A4F60** and **0x4A4F62**, inside a 502-byte region of consecutive zero bytes. This region sits within an uninitialized data table in Seg1 and is not referenced by any code -- modifying it has no runtime effect.
+The two halfwords are placed at file offsets **0x4A4F58** and **0x4A4F5A**, inside a region of consecutive zero bytes. This region sits within an uninitialized data table in Seg1 and is not referenced by any code -- modifying it has no runtime effect.
 
 ## Patch detail
 
 | Offset | Original | Patched | Description |
 |--------|----------|---------|-------------|
-| 0x4A4F60 | `00 00` | `DE 52` | Compensation word 1 (0x52DE) |
-| 0x4A4F62 | `00 00` | `76 EC` | Compensation word 2 (0xEC76) |
+| 0x4A4F58 | `00 00` | `69 72` | Compensation word 1 (0x7269) |
+| 0x4A4F5A | `00 00` | `14 BF` | Compensation word 2 (0xBF14) |
 
-These values are specific to the exact set of code patches applied (Patches 1, 2, 3, and 6). If any code patch changes, the compensation values must be recomputed. The `patch_nosleep.py` script handles this automatically.
+These values are specific to the exact set of code patches applied (telnet + keepalive). If any code patch changes, the compensation values must be recomputed. The `patch.py` script does this automatically every run.
 
 ## Verification
 

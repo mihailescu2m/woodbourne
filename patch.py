@@ -1,295 +1,259 @@
 #!/usr/bin/env python3
 """
-Woodbourne Firmware Patcher
+Polk Woodbourne (B9519) firmware patcher -- final release build.
 
-Patches the Polk Woodbourne (B9519) firmware to:
-  - Block all sleep/standby paths (no-sleep)
-  - Enable telnet shell on port 10000 for remote access
-  - Add visible version marker to confirm patched firmware
+Reads the stock firmware and produces a patched image that:
 
-Target: BridgeCo DMP 3.x RTOS on ARM926EJ-S, flashed via BL-mode web UI.
+  1. TELNET            Routes the BridgeCo diagnostic shell to TCP port 10000
+                       (the stock firmware sends it to serial UART1).
 
-BL-mode flashing preserves the BSL header area (first 0x2000 bytes of seg1),
-so the Fletcher-32 expected value at 0x104 is never updated in flash. Code
-patches must therefore preserve the original Fletcher-32 checksum (0xF7D16EC9)
-by inserting compensation halfwords in an unused zero-padding region.
+  2. KEEPALIVE         Installs a small Thumb "code cave" that hooks the 1 s
+                       UITimerEvtHandler tick.  When the speaker is NOT playing
+                       audio it increments an idle counter; after 1024 ticks
+                       (~17 min) it performs a clean soft reboot via
+                       setSystemPowerState(PowerManager, {3,6}).  Rebooting
+                       resets the *host* companion-chip's 20-minute standby
+                       timer, so the speaker never reaches deep standby.  If
+                       audio IS playing the counter is held at 0, so playback
+                       is never interrupted.
 
-Patches applied:
-  1. Idle timer NOP — 4 ARM NOPs at 0x3C6190-0x3C619C
-  2. PSM FuncB skip — Branch 0x286920 -> 0x28697C (skip BL to sleep)
-  3. PSM FuncA skip — Branch 0x286728 -> 0x2867A0 (skip BL to sleep)
-  4. Config defaults — EnableSleepTimer=0, SleepTime=99
-  5. Version marker — bCoD date='NOSLEEP', Firmwarerevision .0->.1
-  6. Telnet enable  — Force Shell mode to TELNET in loadSettingsFromCne
-  7. Fletcher-32 compensation — 2 halfwords at 0x4A4F60-0x4A4F63
+  3. WEP PATH FIX      Corrects a stock typo in a web-UI ASP template
+                       ('/cf?/...' -> '/cfg/...') that made the wireless config
+                       page log "webCfgNetGetCneValue: bad path".
+
+  4. INTEGRITY         Recomputes Seg1/Seg2/Seg3 CRC-32, the aggregate CRC and
+                       the overall CRC, and inserts two Fletcher-32 compensation
+                       half-words so the BSL's boot-time Fletcher-32 check
+                       (whose expected value is frozen in the preserved BSL
+                       header) still passes.  See docs/patch-3-fletcher32-compensation.md.
+
+The patch deliberately leaves all version/header fields and all logging code at
+their stock values -- forcing verbose logging on (an earlier experiment) made
+the firmware fault into a broken bootloader state when long UPnP/SSDP log lines
+overflowed a fixed 268-byte logger stack buffer.  See docs/power.md.
+
+Usage:
+    python3 patch.py
+Produces: AirplaySpeaker_B9519_H4_D18M12_BSL_Dec18_UART_patched.FW
+
+Platform: ARM926EJ-S (ARMv5TE), little-endian, mixed ARM/Thumb. Python 3, stdlib only.
 """
 
 import struct
-import sys
 import zlib
 
-INPUT = 'AirplaySpeaker_B9519_H4_D18M12_BSL_Dec18_UART.FW'
+INPUT  = 'AirplaySpeaker_B9519_H4_D18M12_BSL_Dec18_UART.FW'
 OUTPUT = 'AirplaySpeaker_B9519_H4_D18M12_BSL_Dec18_UART_patched.FW'
 
-ARM_NOP = b'\x00\x00\xA0\xE1'  # MOV R0, R0
+# --- firmware geometry ------------------------------------------------------
+FS = 0x20D8            # Fletcher-32 range start (Seg1 data + 0x2000)
+FE = 0x4FCCB4          # Fletcher-32 range end (exclusive) = end of Seg1 data
+OF = 0xF7D16EC9        # original (expected) Fletcher-32 -- must be preserved
+RB = 0x60005F28        # RAM base: runtime_addr = file_offset + RB (Seg1)
 
-FLETCHER_START = 0x20D8
-FLETCHER_END = 0x4FCCB4
-ORIGINAL_FLETCHER32 = 0xF7D16EC9
+# --- keepalive hook ---------------------------------------------------------
+INJ      = 0x3D222                       # the 1 s tick log site we redirect to the cave
+INJ_OLD  = bytes([0x5C, 0xF1, 0x5F, 0xFA])  # original bl 0x1996e4 (tick log) we displace
+CAVE     = 0x432894                      # 383 free zero bytes inside Seg1 for our code
+IDLE_TICKS = 1024                        # idle ticks (~1 s each) before the soft reboot
+
+# runtime addresses the cave calls (looked up via the Fletcher-safe literal pool)
+AUDIO  = 0x205730 + RB        # audioStatus()  (ARM, even -> blx)   1 == playing
+GETPM  = (0x207F3C + RB) | 1  # getPowerManager()        (Thumb, low bit set)
+SETPWR = (0x206A74 + RB) | 1  # setSystemPowerState()    (Thumb, low bit set)
+
+# --- web-UI typo fix --------------------------------------------------------
+WEP_FIX = 0x54FFA4   # '?' -> 'g' so the ASP path becomes '/cfg/...'
+
+# --- Fletcher-32 compensation slot (two adjacent zero half-words in Seg1) ----
+COMP1, COMP2 = 0x4A4F58, 0x4A4F5A
 
 
-def compute_seg_crc(fw, seg_base_offset):
-    seg_off = struct.unpack_from('<I', fw, seg_base_offset)[0]
-    seg_size = struct.unpack_from('<I', fw, seg_base_offset + 8)[0]
-    data_start = seg_off + 0x20
-    return zlib.crc32(fw[data_start:data_start + seg_size]) & 0xFFFFFFFF
+# ---------------------------------------------------------------------------
+# checksum helpers
+# ---------------------------------------------------------------------------
+def fletcher32(fw, s, e):
+    a = b = 0xFFFF
+    for i in range(s, e - 1, 2):
+        w = fw[i] | (fw[i + 1] << 8)
+        a = (a + w) % 65535
+        b = (b + a) % 65535
+    return (b << 16) | a
 
 
-def compute_aggregate_crc(fw):
-    data = bytearray(fw[0x20:0xD0])
-    data[0x2C:0x30] = b'\x00\x00\x00\x00'
-    return zlib.crc32(bytes(data)) & 0xFFFFFFFF
+def seg_crc(fw, base):
+    """CRC-32 of the segment whose descriptor lives at `base` (0x50/0x70/0x90)."""
+    off  = struct.unpack_from('<I', fw, base)[0]
+    size = struct.unpack_from('<I', fw, base + 8)[0]
+    return zlib.crc32(fw[off + 0x20: off + 0x20 + size]) & 0xFFFFFFFF
 
 
-def compute_overall_crc(fw):
+def aggregate_crc(fw):
+    d = bytearray(fw[0x20:0xD0])
+    d[0x2C:0x30] = b'\0\0\0\0'          # zero the aggregate-CRC field itself
+    return zlib.crc32(bytes(d)) & 0xFFFFFFFF
+
+
+def overall_crc(fw):
     return zlib.crc32(fw[0x20:]) & 0xFFFFFFFF
 
 
-def compute_fletcher32(fw, start, end):
-    data = fw[start:end]
-    s1 = 0xFFFF
-    s2 = 0xFFFF
-    for i in range(0, len(data) - 1, 2):
-        word = struct.unpack_from('<H', data, i)[0]
-        s1 = (s1 + word) % 65535
-        s2 = (s2 + s1) % 65535
-    return (s2 << 16) | s1
-
-
-def compute_fletcher32_compensation(fw, patches, comp_pos1, comp_pos2):
-    """Solve for two halfword values that cancel the Fletcher-32 delta."""
+def fletcher_compensation(patches, p1, p2):
+    """
+    Solve for two half-words at file offsets p1,p2 (adjacent, both inside the
+    Fletcher range) that cancel the net delta introduced by `patches`, so the
+    overall Fletcher-32 equals the original.  Closed form over GF(65535).
+    """
     M = 65535
-    N = (FLETCHER_END - FLETCHER_START) // 2
-
-    delta_s1 = 0
-    delta_s2 = 0
-
-    for file_off, old_bytes, new_bytes in patches:
-        for byte_off in range(0, len(old_bytes), 2):
-            off = file_off + byte_off
-            if not (FLETCHER_START <= off < FLETCHER_END):
+    N = (FE - FS) // 2
+    d1 = d2 = 0
+    for off, old, new in patches:
+        for i in range(len(old)):
+            ab = off + i
+            if not (FS <= ab < FE) or old[i] == new[i]:
                 continue
-            j = (off - FLETCHER_START) // 2
-            old_hw = struct.unpack_from('<H', old_bytes, byte_off)[0]
-            new_hw = struct.unpack_from('<H', new_bytes, byte_off)[0]
-            delta = (new_hw - old_hw) % M
-            delta_s1 = (delta_s1 + delta) % M
-            delta_s2 = (delta_s2 + (N - j) * delta) % M
-
-    need_s1 = (-delta_s1) % M
-    need_s2 = (-delta_s2) % M
-
-    j1 = (comp_pos1 - FLETCHER_START) // 2
-    j2 = (comp_pos2 - FLETCHER_START) // 2
+            rel = ab - FS
+            j   = rel // 2
+            sh  = 8 * (rel % 2)
+            hd  = ((new[i] - old[i]) << sh) % M
+            d1 = (d1 + hd) % M
+            d2 = (d2 + (N - j) * hd) % M
+    n1 = (-d1) % M
+    n2 = (-d2) % M
+    j1 = (p1 - FS) // 2
+    j2 = (p2 - FS) // 2
     assert j2 == j1 + 1
-
     w2 = (N - j2) % M
-    d1 = (need_s2 - w2 * need_s1) % M
-    d2 = (need_s1 - d1) % M
-
-    # Verify solution
-    assert (d1 + d2) % M == need_s1
-    assert ((N - j1) * d1 + (N - j2) * d2) % M == need_s2
-
-    return d1, d2
+    a  = (n2 - w2 * n1) % M
+    b  = (n1 - a) % M
+    assert (a + b) % M == n1 and ((N - j1) * a + (N - j2) * b) % M == n2
+    return a, b
 
 
-def patch_bytes(fw, offset, new_bytes, desc):
-    old = fw[offset:offset + len(new_bytes)]
-    fw[offset:offset + len(new_bytes)] = new_bytes
-    print("  0x%06X: %s -> %s  (%s)" % (
-        offset,
-        ' '.join('%02X' % b for b in old),
-        ' '.join('%02X' % b for b in new_bytes),
+# ---------------------------------------------------------------------------
+# encoders
+# ---------------------------------------------------------------------------
+def thumb_bl(src, dst):
+    """Encode a Thumb BL/BLX from `src` to `dst` (4 bytes, little-endian)."""
+    off = dst - (src + 4)
+    S    = (off >> 24) & 1
+    I1   = (off >> 23) & 1
+    I2   = (off >> 22) & 1
+    imm10 = (off >> 12) & 0x3FF
+    imm11 = (off >> 1) & 0x7FF
+    J1 = (~I1 ^ S) & 1
+    J2 = (~I2 ^ S) & 1
+    return struct.pack('<HH', 0xF000 | (S << 10) | imm10,
+                              0xD000 | (J1 << 13) | (J2 << 11) | imm11)
+
+
+def H(v):
+    return struct.pack('<H', v)
+
+
+def cave_bytes():
+    """
+    Keepalive code cave (Thumb).  Layout (offsets from CAVE):
+
+      +00 push {r4,lr}
+      +02 ldr  r3,[pc,#0x3C] ; AUDIO
+      +04 blx  r3            ; r0 = audioStatus()  (1 == playing)
+      +06 cmp  r0,#0
+      +08 bne  .reset        ; playing -> hold counter at 0
+      +0A ldr  r4,[pc,#0x44] ; &counter
+      +0C ldr  r0,[r4]
+      +0E adds r0,#1
+      +10 ldr  r1,[pc,#0x38] ; IDLE_TICKS
+      +12 cmp  r0,r1
+      +14 bge  .reboot
+      +16 str  r0,[r4]       ; counter++
+      +18 pop  {r4,pc}
+      +1A .reset:  ldr r4,[pc,#0x34]; movs r0,#0; str r0,[r4]; pop {r4,pc}
+      +22 .reboot: ldr r4,[pc,#0x2C]; movs r0,#0; str r0,[r4]   ; counter=0
+      +28 sub  sp,#8
+      +2A movs r0,#3 ; str r0,[sp]        ; power-state struct {3,
+      +2E movs r0,#6 ; str r0,[sp,#4]     ;                       6}
+      +32 ldr  r3,[pc,#0x10]; blx r3      ; getPowerManager()
+      +36 mov  r1,sp
+      +38 ldr  r3,[pc,#0x0C]; blx r3      ; setSystemPowerState(PM,&{3,6}) -> soft reboot
+      +3C add  sp,#8
+      +3E pop  {r4,pc}
+      +40 literal pool: AUDIO, GETPM, SETPWR, IDLE_TICKS, &counter, counter(=0)
+    """
+    code = b''.join([
+        H(0xB510), H(0x4B0F), H(0x4798), H(0x2800), H(0xD107), H(0x4C11), H(0x6820), H(0x3001),
+        H(0x490E), H(0x4288), H(0xDA05), H(0x6020), H(0xBD10), H(0x4C0D), H(0x2000), H(0x6020),
+        H(0xBD10), H(0x4C0B), H(0x2000), H(0x6020), H(0xB082), H(0x2003), H(0x9000), H(0x2006),
+        H(0x9001), H(0x4B04), H(0x4798), H(0x4669), H(0x4B03), H(0x4798), H(0xB002), H(0xBD10),
+    ])
+    assert len(code) == 0x40
+    # literal pool: counter lives in-cave at CAVE+0x54 (RAM addr stored as a literal)
+    pool = struct.pack('<IIIII', AUDIO, GETPM, SETPWR, IDLE_TICKS, CAVE + 0x54 + RB)
+    pool += struct.pack('<I', 0)   # the idle counter itself, initialised to 0
+    return code + pool
+
+
+def apply_patch(fw, off, new, desc):
+    old = bytes(fw[off:off + len(new)])
+    fw[off:off + len(new)] = new
+    print("  0x%06X: %-23s -> %-23s (%s)" % (
+        off,
+        ' '.join('%02X' % x for x in old[:8]),
+        ' '.join('%02X' % x for x in new[:8]),
         desc))
-    return bytes(old)
 
 
+# ---------------------------------------------------------------------------
 def main():
-    with open(INPUT, 'rb') as f:
-        fw = bytearray(f.read())
+    fw = bytearray(open(INPUT, 'rb').read())
+    assert fletcher32(fw, FS, FE) == OF, "input is not the expected stock firmware"
 
-    print("Woodbourne Firmware Patcher")
-    print("Input: %s (%d bytes)" % (INPUT, len(fw)))
-    print()
+    # Collect (offset, old, new) tuples first so the Fletcher compensation can
+    # account for every code change before we write anything.
+    patches = []
 
-    # --- Verify original checksums ---
-    print("Verifying original checksums...")
-    for name, base in [("Seg1", 0x50), ("Seg2", 0x70), ("Seg3", 0x90)]:
-        expected = struct.unpack_from('<I', fw, base + 12)[0]
-        computed = compute_seg_crc(fw, base)
-        ok = "OK" if expected == computed else "MISMATCH!"
-        print("  %s CRC: 0x%08X %s" % (name, computed, ok))
-        if expected != computed:
-            sys.exit("ERROR: Original CRC mismatch.")
+    # 1. telnet: force the UART1 shell-mode handler to store TELNET (1) instead
+    ta = struct.pack('<I', 0xE3A00001)   # MOV  R0, #1
+    tb = struct.pack('<I', 0xE5C4001D)   # STRB R0, [R4, #0x1D]
+    patches.append((0x107628, bytes(fw[0x107628:0x10762C]), ta))
+    patches.append((0x10762C, bytes(fw[0x10762C:0x107630]), tb))
 
-    orig_f32 = struct.unpack_from('<I', fw, 0x104)[0]
-    computed_f32 = compute_fletcher32(fw, FLETCHER_START, FLETCHER_END)
-    print("  Fletcher-32: 0x%08X %s" % (computed_f32,
-          "OK" if orig_f32 == computed_f32 else "MISMATCH!"))
-    assert orig_f32 == ORIGINAL_FLETCHER32
-    print("  Aggregate CRC: OK")
-    print("  Overall CRC: OK")
-    print()
+    # 3. WEP web-UI path typo fix: '?' -> 'g'
+    assert fw[WEP_FIX] == 0x3F, "WEP path byte is not '?'"
+    patches.append((WEP_FIX, b'?', b'g'))
 
-    # --- Collect seg1 patches for Fletcher-32 compensation ---
-    fletcher_patches = []
+    # 2. keepalive cave + the tick-hook redirect
+    cave = cave_bytes()
+    assert fw[CAVE:CAVE + len(cave)] == b'\x00' * len(cave), "cave region is not free"
+    patches.append((CAVE, b'\x00' * len(cave), cave))
+    assert fw[INJ:INJ + 4] == INJ_OLD, "tick hook site does not match"
+    patches.append((INJ, INJ_OLD, thumb_bl(INJ, CAVE)))
 
-    # Patch 1: Idle timer — NOP 4 ARM instructions
-    print("PATCH 1: Idle timer NOP")
-    for off in [0x3C6190, 0x3C6194, 0x3C6198, 0x3C619C]:
-        fletcher_patches.append((off, bytes(fw[off:off+4]), ARM_NOP))
+    # 4. Fletcher compensation (computed over the code patches above)
+    assert fw[COMP1:COMP1 + 4] == b'\0\0\0\0', "compensation slot is not free"
+    d1, d2 = fletcher_compensation(patches, COMP1, COMP2)
 
-    # Patch 2: PSM FuncB — branch past sleep call
-    print("PATCH 2: PSM FuncB skip sleep")
-    branch_b = struct.pack('<I', 0xEA000015)
-    fletcher_patches.append((0x286920, bytes(fw[0x286920:0x286924]), branch_b))
-
-    # Patch 3: PSM FuncA — branch past sleep call
-    print("PATCH 3: PSM FuncA skip sleep")
-    branch_a = struct.pack('<I', 0xEA00001C)
-    fletcher_patches.append((0x286728, bytes(fw[0x286728:0x28672C]), branch_a))
-
-    # Patch 6: Telnet — force Shell mode to TELNET in loadSettingsFromCne
-    # When Shell=UART1, code stores 0x66 (UART1). We change to store 1 (TELNET)
-    # so the telnet server starts its listener on port 10000.
-    #   0x107628: BNE error        -> MOV R0, #1
-    #   0x10762C: STRB R5,[R4,#29] -> STRB R0,[R4,#29]
-    print("PATCH 6: Shell mode -> TELNET")
-    telnet_a = struct.pack('<I', 0xE3A00001)  # MOV R0, #1
-    telnet_b = struct.pack('<I', 0xE5C4001D)  # STRB R0, [R4, #0x1D]
-    fletcher_patches.append((0x107628, bytes(fw[0x107628:0x10762C]), telnet_a))
-    fletcher_patches.append((0x10762C, bytes(fw[0x10762C:0x107630]), telnet_b))
-
-    # --- Compute Fletcher-32 compensation ---
-    comp_pos1 = 0x4A4F60
-    comp_pos2 = 0x4A4F62
-    assert fw[comp_pos1:comp_pos1+4] == b'\x00\x00\x00\x00', "Comp area not zero!"
-
-    print()
-    print("PATCH 7: Fletcher-32 compensation")
-    d1, d2 = compute_fletcher32_compensation(fw, fletcher_patches, comp_pos1, comp_pos2)
-    print("  Values: 0x%04X @ 0x%06X, 0x%04X @ 0x%06X" % (
-        d1, comp_pos1, d2, comp_pos2))
-
-    # --- Apply all patches ---
-    print()
     print("Applying patches...")
+    apply_patch(fw, 0x107628, ta, 'telnet: shell -> TELNET')
+    apply_patch(fw, 0x10762C, tb, 'telnet: store TELNET mode')
+    apply_patch(fw, WEP_FIX, b'g', "WEP ASP path '/cf?/' -> '/cfg/'")
+    apply_patch(fw, CAVE, cave, 'keepalive cave (idle %d ticks -> soft reboot)' % IDLE_TICKS)
+    apply_patch(fw, INJ, thumb_bl(INJ, CAVE), 'tick hook 0x3D222 -> cave')
+    apply_patch(fw, COMP1, struct.pack('<H', d1), 'Fletcher compensation #1')
+    apply_patch(fw, COMP2, struct.pack('<H', d2), 'Fletcher compensation #2')
 
-    for off in [0x3C6190, 0x3C6194, 0x3C6198, 0x3C619C]:
-        patch_bytes(fw, off, ARM_NOP, "NOP idle timer")
+    # integrity: Fletcher must match the frozen original; recompute every CRC
+    assert fletcher32(fw, FS, FE) == OF, "FLETCHER MISMATCH -- would brick"
+    for name, base in (("Seg1", 0x50), ("Seg2", 0x70), ("Seg3", 0x90)):
+        struct.pack_into('<I', fw, base + 12, seg_crc(fw, base))
+    struct.pack_into('<I', fw, 0x4C, aggregate_crc(fw))
+    struct.pack_into('<I', fw, 0x10, overall_crc(fw))
 
-    patch_bytes(fw, 0x286920, branch_b, "B 0x28697C (skip sleep)")
-    patch_bytes(fw, 0x286728, branch_a, "B 0x2867A0 (skip sleep)")
-
-    print()
-    print("PATCH 4: Config defaults")
-    patch_bytes(fw, 0x4FE6F5, b'\x30', "EnableSleepTimer 1->0")
-    patch_bytes(fw, 0x4FDCE6, b'\x39\x39', "SleepTime 00->99")
-
-    print()
-    print("PATCH 5: Version marker")
-    patch_bytes(fw, 0x30, b'NOSLEEP ', "bCoD date")
-    patch_bytes(fw, 0x50C43F, b'\x31', "Firmwarerevision .0->.1")
-
-    print()
-    print("PATCH 6: Shell mode -> TELNET")
-    patch_bytes(fw, 0x107628, telnet_a, "MOV R0, #1 (TELNET)")
-    patch_bytes(fw, 0x10762C, telnet_b, "STRB R0, [R4, #0x1D]")
-
-    print()
-    print("PATCH 7: Fletcher-32 compensation")
-    patch_bytes(fw, comp_pos1, struct.pack('<H', d1), "comp word 1")
-    patch_bytes(fw, comp_pos2, struct.pack('<H', d2), "comp word 2")
-
-    # --- Verify Fletcher-32 ---
-    print()
-    new_f32 = compute_fletcher32(fw, FLETCHER_START, FLETCHER_END)
-    print("Fletcher-32: 0x%08X %s" % (new_f32,
-          "MATCH" if new_f32 == ORIGINAL_FLETCHER32 else "MISMATCH!"))
-    if new_f32 != ORIGINAL_FLETCHER32:
-        sys.exit(1)
-
-    # --- Recompute CRCs ---
-    print()
-    print("Recomputing CRCs...")
-    for name, base in [("Seg1", 0x50), ("Seg2", 0x70), ("Seg3", 0x90)]:
-        new_crc = compute_seg_crc(fw, base)
-        old_crc = struct.unpack_from('<I', fw, base + 12)[0]
-        struct.pack_into('<I', fw, base + 12, new_crc)
-        tag = "UPDATED" if old_crc != new_crc else "unchanged"
-        print("  %s: 0x%08X -> 0x%08X (%s)" % (name, old_crc, new_crc, tag))
-
-    old_agg = struct.unpack_from('<I', fw, 0x4C)[0]
-    new_agg = compute_aggregate_crc(fw)
-    struct.pack_into('<I', fw, 0x4C, new_agg)
-    print("  Agg: 0x%08X -> 0x%08X" % (old_agg, new_agg))
-
-    old_overall = struct.unpack_from('<I', fw, 0x10)[0]
-    new_overall = compute_overall_crc(fw)
-    struct.pack_into('<I', fw, 0x10, new_overall)
-    print("  All: 0x%08X -> 0x%08X" % (old_overall, new_overall))
-
-    # --- Final verification ---
-    print()
-    print("Verifying...")
-    all_ok = True
-    for name, base in [("Seg1", 0x50), ("Seg2", 0x70), ("Seg3", 0x90)]:
-        ok = struct.unpack_from('<I', fw, base + 12)[0] == compute_seg_crc(fw, base)
-        print("  %s CRC: %s" % (name, "OK" if ok else "FAIL"))
-        all_ok &= ok
-    ok = struct.unpack_from('<I', fw, 0x4C)[0] == compute_aggregate_crc(fw)
-    print("  Aggregate: %s" % ("OK" if ok else "FAIL"))
-    all_ok &= ok
-    ok = struct.unpack_from('<I', fw, 0x10)[0] == compute_overall_crc(fw)
-    print("  Overall: %s" % ("OK" if ok else "FAIL"))
-    all_ok &= ok
-    ok = compute_fletcher32(fw, FLETCHER_START, FLETCHER_END) == ORIGINAL_FLETCHER32
-    print("  Fletcher-32: %s" % ("OK" if ok else "FAIL"))
-    all_ok &= ok
-
-    if not all_ok:
-        sys.exit("Verification failed!")
-
-    # --- Write output ---
-    with open(OUTPUT, 'wb') as f:
-        f.write(fw)
-
-    diff_count = sum(1 for a, b in zip(open(INPUT,'rb').read(), fw) if a != b)
-
-    print()
-    print("=" * 60)
+    open(OUTPUT, 'wb').write(fw)
+    orig = open(INPUT, 'rb').read()
+    diff = sum(1 for i in range(len(fw)) if fw[i] != orig[i])
+    print("\nFletcher-32: 0x%08X (OK)  |  bytes changed: %d" % (fletcher32(fw, FS, FE), diff))
     print("Output: %s" % OUTPUT)
-    print("%d bytes modified" % diff_count)
-    print("=" * 60)
-    print()
-    print("No-sleep patches:")
-    print("  1. Idle timer: 4 ARM NOPs at 0x3C6190-0x3C619C")
-    print("  2. PSM FuncB: B 0x28697C at 0x286920")
-    print("  3. PSM FuncA: B 0x2867A0 at 0x286728")
-    print("  4. EnableSleepTimer=0, SleepTime=99")
-    print()
-    print("Telnet shell:")
-    print("  6. Shell mode forced to TELNET (code patch at 0x107628)")
-    print("     telnet <speaker-ip> 10000")
-    print()
-    print("Version:")
-    print("  5. bCoD date='NOSLEEP', Firmwarerevision .1")
-    print("     Check: http://<speaker-ip>/firmware_update_prepare.asp")
-    print()
-    print("Checksums:")
-    print("  7. Fletcher-32 compensation at 0x4A4F60 (BSL area preserved)")
-    print("  CRCs updated: Seg1, Seg2, Aggregate, Overall")
 
 
 if __name__ == '__main__':
