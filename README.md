@@ -54,6 +54,19 @@ BL‑mode re‑flashing keeps working and the speaker is always recoverable.
 
 ---
 
+## ☕ Support this work
+
+If this saved you from a sleepy speaker — or you just enjoyed the write‑up — a small
+donation is hugely appreciated and keeps projects like this coming.
+
+<p align="center">
+  <a href="https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=mihailescu2m%40gmail%2Ecom&lc=AU&item_name=memeka&item_number=odroid&currency_code=AUD&bn=PP%2DDonationsBF%3Abtn_donate_LG%2Egif%3ANonHosted">
+    <img src="https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif" alt="Donate with PayPal" />
+  </a>
+</p>
+
+---
+
 ## What's in the patch
 
 Four changes, **106 bytes** different from stock, all checksums kept valid.
@@ -189,24 +202,11 @@ direction, the (long, attended) flash‑and‑wait testing, and the hardware:
 | Owner — testing: ~100 flash cycles + dozens of 17–20 min standby/reboot waits | ~55 | $65/h | **$3,575** |
 | Hardware — Raspberry Pi Zero 2 W, microSD, PSU, USB‑serial adapter, cables | — | — | **~$50** |
 | AI — Claude Code Opus (~75M total tokens) | — | — | **~$1200** |
-| **Total** | **~80 h** | | **≈ $6,450** |
+| **Total** | **~80 h** | | **≈$6,450** |
 
 *(Rough, tongue‑in‑cheek figures — the speaker itself isn't counted. The real point:
 "just disable the sleep timer" turned into a months-long archaeology dig because the timer
 was on a chip we could never read.)*
-
----
-
-## ☕ Support this work
-
-If this saved you from a sleepy speaker — or you just enjoyed the write‑up — a small
-donation is hugely appreciated and keeps projects like this coming.
-
-<p align="center">
-  <a href="https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=mihailescu2m%40gmail%2Ecom&lc=AU&item_name=memeka&item_number=odroid&currency_code=AUD&bn=PP%2DDonationsBF%3Abtn_donate_LG%2Egif%3ANonHosted">
-    <img src="https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif" alt="Donate with PayPal" />
-  </a>
-</p>
 
 ---
 
